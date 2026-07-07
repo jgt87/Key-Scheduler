@@ -2,6 +2,8 @@
 
 A small Windows desktop utility for scheduling a keystroke to be sent to the app that is active when the schedule fires.
 
+![Key Scheduler screenshot](docs/screenshot.png)
+
 ## Run
 
 Portable executable:
