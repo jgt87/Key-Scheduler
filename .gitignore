@@ -1,0 +1,11 @@
+# Windows shortcut (machine-specific)
+*.lnk
+
+# Local tooling
+.claude/
+.agents/
+.impeccable/
+
+# Build/runtime artifacts
+*.pdb
+*.obj
