@@ -1,6 +1,14 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Win11 DWM interop so the title bar follows the app's light/dark theme (Fluent).
+if (-not ("Native.Dwm" -as [type])) {
+    Add-Type -Namespace Native -Name Dwm -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+public static extern int DwmSetWindowAttribute(System.IntPtr hwnd, int attr, ref int val, int size);
+'@
+}
+
 $ErrorActionPreference = "Stop"
 
 $AppName = "Key Scheduler"
@@ -360,86 +368,349 @@ function Clear-FormSelection {
     $timePicker.Value = (Get-Date).AddMinutes(1)
 }
 
+# =====================================================================
+#  Fluent Design theme (color, typography, elevation, geometry, motion)
+#  https://learn.microsoft.com/windows/apps/design/guidelines-overview
+# =====================================================================
+
+function Blend-Color {
+    param([System.Drawing.Color]$From, [System.Drawing.Color]$To, [double]$T)
+    $r = [int][math]::Round($From.R + ($To.R - $From.R) * $T)
+    $g = [int][math]::Round($From.G + ($To.G - $From.G) * $T)
+    $b = [int][math]::Round($From.B + ($To.B - $From.B) * $T)
+    $clamp = { param($v) [math]::Max(0, [math]::Min(255, $v)) }
+    return [System.Drawing.Color]::FromArgb((& $clamp $r), (& $clamp $g), (& $clamp $b))
+}
+
+function C { param($r, $g, $b) [System.Drawing.Color]::FromArgb($r, $g, $b) }
+
+# Honor the user's system accent color, the heart of a Fluent app's identity.
+function Get-AccentColor {
+    try {
+        $v = [int64](Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\DWM' -Name AccentColor -ErrorAction Stop).AccentColor
+        return (C ($v -band 0xFF) (($v -shr 8) -band 0xFF) (($v -shr 16) -band 0xFF))
+    }
+    catch {
+        return (C 0 95 184)   # Fallback: Windows default accent (#005FB8)
+    }
+}
+
+# Follow the system light/dark app theme.
+$script:IsDark = $false
+try {
+    $lightPref = (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme -ErrorAction Stop).AppsUseLightTheme
+    $script:IsDark = ($lightPref -eq 0)
+}
+catch { }
+
+$accent = Get-AccentColor
+if ($script:IsDark) { $accent = Blend-Color $accent ([System.Drawing.Color]::White) 0.10 }
+
+# Text-on-accent legibility (accent buttons flip to dark text on light accents).
+$accentLum = 0.299 * $accent.R + 0.587 * $accent.G + 0.114 * $accent.B
+$onAccent = if ($accentLum -gt 150) { C 20 20 20 } else { [System.Drawing.Color]::White }
+
+if ($script:IsDark) {
+    $script:Palette = @{
+        WinBg          = (C 32 32 32)
+        CardBg         = (C 43 43 43)
+        CardBorder     = (C 56 56 56)
+        TextPrimary    = (C 255 255 255)
+        TextSecondary  = (C 176 176 176)
+        ControlBg      = (C 59 59 59)
+        ControlHover   = (C 68 68 68)
+        ControlPressed = (C 52 52 52)
+        ControlBorder  = (C 80 80 80)
+        Accent         = $accent
+        AccentHover    = (Blend-Color $accent ([System.Drawing.Color]::White) 0.12)
+        AccentPressed  = (Blend-Color $accent ([System.Drawing.Color]::Black) 0.12)
+        OnAccent       = $onAccent
+        GridSelBg      = (Blend-Color (C 43 43 43) $accent 0.30)
+        GridSelFg      = (C 255 255 255)
+    }
+}
+else {
+    $script:Palette = @{
+        WinBg          = (C 243 243 243)
+        CardBg         = (C 255 255 255)
+        CardBorder     = (C 229 229 229)
+        TextPrimary    = (C 26 26 26)
+        TextSecondary  = (C 94 94 94)
+        ControlBg      = (C 251 251 251)
+        ControlHover   = (C 244 244 244)
+        ControlPressed = (C 237 237 237)
+        ControlBorder  = (C 214 214 214)
+        Accent         = $accent
+        AccentHover    = (Blend-Color $accent ([System.Drawing.Color]::Black) 0.10)
+        AccentPressed  = (Blend-Color $accent ([System.Drawing.Color]::Black) 0.20)
+        OnAccent       = $onAccent
+        GridSelBg      = (Blend-Color (C 255 255 255) $accent 0.14)
+        GridSelFg      = (C 26 26 26)
+    }
+}
+
+# Typography: the Segoe UI type ramp (Body / Body Strong / Title / Caption).
+$installedFonts = (New-Object System.Drawing.Text.InstalledFontCollection).Families | ForEach-Object { $_.Name }
+$baseFamily = @('Segoe UI Variable Text', 'Segoe UI') | Where-Object { $installedFonts -contains $_ } | Select-Object -First 1
+if (-not $baseFamily) { $baseFamily = 'Segoe UI' }
+$semiFamily = if ($installedFonts -contains 'Segoe UI Semibold') { 'Segoe UI Semibold' } else { $baseFamily }
+
+$script:FontBody = New-Object System.Drawing.Font $baseFamily, 10, ([System.Drawing.FontStyle]::Regular)
+$script:FontCaption = New-Object System.Drawing.Font $baseFamily, 8.5, ([System.Drawing.FontStyle]::Regular)
+if ($semiFamily -ne $baseFamily) {
+    $script:FontStrong = New-Object System.Drawing.Font $semiFamily, 10, ([System.Drawing.FontStyle]::Regular)
+    $script:FontTitle = New-Object System.Drawing.Font $semiFamily, 16, ([System.Drawing.FontStyle]::Regular)
+}
+else {
+    $script:FontStrong = New-Object System.Drawing.Font $baseFamily, 10, ([System.Drawing.FontStyle]::Bold)
+    $script:FontTitle = New-Object System.Drawing.Font $baseFamily, 16, ([System.Drawing.FontStyle]::Bold)
+}
+
+function Enable-DoubleBuffer {
+    param([System.Windows.Forms.Control]$Control)
+    $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic)
+    $prop.SetValue($Control, $true, $null)
+}
+
+function New-RoundedPath {
+    param([System.Drawing.Rectangle]$Rect, [int]$Radius)
+    $d = $Radius * 2
+    $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $p.AddArc($Rect.X, $Rect.Y, $d, $d, 180, 90)
+    $p.AddArc($Rect.Right - $d, $Rect.Y, $d, $d, 270, 90)
+    $p.AddArc($Rect.Right - $d, $Rect.Bottom - $d, $d, $d, 0, 90)
+    $p.AddArc($Rect.X, $Rect.Bottom - $d, $d, $d, 90, 90)
+    $p.CloseFigure()
+    return $p
+}
+
+# Elevation: a rounded, bordered surface (Fluent "card"), 8px corner radius.
+function New-Card {
+    param([string]$Title)
+    $card = New-Object System.Windows.Forms.Panel
+    Enable-DoubleBuffer $card
+    $card.Dock = 'Fill'
+    $card.BackColor = $script:Palette.WinBg
+    $card.Margin = New-Object System.Windows.Forms.Padding 0, 0, 0, 14
+    $card.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $rect = New-Object System.Drawing.Rectangle 0, 0, ($s.Width - 1), ($s.Height - 1)
+        $path = New-RoundedPath $rect 8
+        $brush = New-Object System.Drawing.SolidBrush $script:Palette.CardBg
+        $pen = New-Object System.Drawing.Pen $script:Palette.CardBorder
+        $g.FillPath($brush, $path)
+        $g.DrawPath($pen, $path)
+        $brush.Dispose(); $pen.Dispose(); $path.Dispose()
+    })
+
+    $header = New-Object System.Windows.Forms.Label
+    $header.Text = $Title
+    $header.AutoSize = $true
+    $header.Location = New-Object System.Drawing.Point 18, 13
+    $header.Font = $script:FontStrong
+    $header.ForeColor = $script:Palette.TextPrimary
+    $header.BackColor = $script:Palette.CardBg
+    $card.Controls.Add($header)
+    return $card
+}
+
+# Commanding: owner-drawn accent / subtle buttons with hover + pressed motion.
+function New-FluentButton {
+    param([string]$Text, [int]$Width, [switch]$Primary, [System.Drawing.Color]$Container)
+    if (-not $Container) { $Container = $script:Palette.CardBg }
+    $b = New-Object System.Windows.Forms.Panel
+    Enable-DoubleBuffer $b
+    $b.Width = $Width
+    $b.Height = 32
+    $b.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $b.BackColor = $Container
+    Add-Member -InputObject $b -NotePropertyName Caption -NotePropertyValue $Text
+    Add-Member -InputObject $b -NotePropertyName IsPrimary -NotePropertyValue ([bool]$Primary)
+    Add-Member -InputObject $b -NotePropertyName Hover -NotePropertyValue $false
+    Add-Member -InputObject $b -NotePropertyName Pressed -NotePropertyValue $false
+    $b.Add_MouseEnter({ $this.Hover = $true; $this.Invalidate() })
+    $b.Add_MouseLeave({ $this.Hover = $false; $this.Pressed = $false; $this.Invalidate() })
+    $b.Add_MouseDown({ $this.Pressed = $true; $this.Invalidate() })
+    $b.Add_MouseUp({ $this.Pressed = $false; $this.Invalidate() })
+    $b.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear($s.BackColor)
+        $rect = New-Object System.Drawing.Rectangle 0, 0, ($s.Width - 1), ($s.Height - 1)
+        $path = New-RoundedPath $rect 4
+        if ($s.IsPrimary) {
+            $fill = if ($s.Pressed) { $script:Palette.AccentPressed } elseif ($s.Hover) { $script:Palette.AccentHover } else { $script:Palette.Accent }
+            $fg = $script:Palette.OnAccent
+        }
+        else {
+            $fill = if ($s.Pressed) { $script:Palette.ControlPressed } elseif ($s.Hover) { $script:Palette.ControlHover } else { $script:Palette.ControlBg }
+            $fg = $script:Palette.TextPrimary
+        }
+        $brush = New-Object System.Drawing.SolidBrush $fill
+        $g.FillPath($brush, $path)
+        $brush.Dispose()
+        if (-not $s.IsPrimary) {
+            $pen = New-Object System.Drawing.Pen $script:Palette.ControlBorder
+            $g.DrawPath($pen, $path)
+            $pen.Dispose()
+        }
+        $path.Dispose()
+        $flags = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter
+        [System.Windows.Forms.TextRenderer]::DrawText($g, $s.Caption, $script:FontStrong, $s.ClientRectangle, $fg, $flags)
+    })
+    return $b
+}
+
+function New-FieldLabel {
+    param([string]$Text, [int]$X, [int]$Y)
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $Text
+    $l.AutoSize = $true
+    $l.Location = New-Object System.Drawing.Point $X, $Y
+    $l.Font = $script:FontCaption
+    $l.ForeColor = $script:Palette.TextSecondary
+    $l.BackColor = $script:Palette.CardBg
+    return $l
+}
+
+function Style-Input {
+    param([System.Windows.Forms.Control]$Control)
+    $Control.Font = $script:FontBody
+    $Control.BackColor = $script:Palette.ControlBg
+    $Control.ForeColor = $script:Palette.TextPrimary
+    if ($Control -is [System.Windows.Forms.ComboBox]) {
+        $Control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    }
+}
+
+# Layout: a flat, borderless list surface consistent with Fluent data tables.
+function Style-FluentGrid {
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $Grid.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+    $Grid.BackgroundColor = $script:Palette.CardBg
+    $Grid.GridColor = $script:Palette.CardBorder
+    $Grid.EnableHeadersVisualStyles = $false
+    $Grid.CellBorderStyle = [System.Windows.Forms.DataGridViewCellBorderStyle]::SingleHorizontal
+    $Grid.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::None
+    $Grid.RowHeadersVisible = $false
+    $Grid.AllowUserToResizeRows = $false
+    $Grid.Font = $script:FontBody
+    $Grid.RowTemplate.Height = 34
+    $Grid.ColumnHeadersHeight = 36
+    $Grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
+
+    $pad = New-Object System.Windows.Forms.Padding 8, 0, 8, 0
+
+    $h = $Grid.ColumnHeadersDefaultCellStyle
+    $h.BackColor = $script:Palette.CardBg
+    $h.ForeColor = $script:Palette.TextSecondary
+    $h.SelectionBackColor = $script:Palette.CardBg
+    $h.SelectionForeColor = $script:Palette.TextSecondary
+    $h.Font = $script:FontStrong
+    $h.Padding = $pad
+
+    $c = $Grid.DefaultCellStyle
+    $c.BackColor = $script:Palette.CardBg
+    $c.ForeColor = $script:Palette.TextPrimary
+    $c.SelectionBackColor = $script:Palette.GridSelBg
+    $c.SelectionForeColor = $script:Palette.GridSelFg
+    $c.Padding = $pad
+}
+
 Load-Data
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = $AppName
-$form.Size = New-Object System.Drawing.Size(900, 620)
-$form.MinimumSize = New-Object System.Drawing.Size(780, 520)
+$form.Size = New-Object System.Drawing.Size 920, 660
+$form.MinimumSize = New-Object System.Drawing.Size 800, 560
 $form.StartPosition = "CenterScreen"
+$form.BackColor = $script:Palette.WinBg
+$form.ForeColor = $script:Palette.TextPrimary
+$form.Font = $script:FontBody
 
 $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $mainLayout.Dock = "Fill"
+$mainLayout.BackColor = $script:Palette.WinBg
+$mainLayout.Padding = New-Object System.Windows.Forms.Padding 24, 18, 24, 12
 $mainLayout.ColumnCount = 1
-$mainLayout.RowCount = 4
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 126))) | Out-Null
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 58))) | Out-Null
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 42))) | Out-Null
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 32))) | Out-Null
+$mainLayout.RowCount = 5
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 60))) | Out-Null
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 176))) | Out-Null
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 56))) | Out-Null
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 44))) | Out-Null
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 30))) | Out-Null
 $form.Controls.Add($mainLayout)
 
-$inputPanel = New-Object System.Windows.Forms.GroupBox
-$inputPanel.Text = "Queue"
-$inputPanel.Dock = "Fill"
-$mainLayout.Controls.Add($inputPanel, 0, 0)
+# --- Header (app title + subtitle) ---
+$headerPanel = New-Object System.Windows.Forms.Panel
+$headerPanel.Dock = "Fill"
+$headerPanel.BackColor = $script:Palette.WinBg
 
-$keyLabel = New-Object System.Windows.Forms.Label
-$keyLabel.Text = "Key"
-$keyLabel.Location = New-Object System.Drawing.Point(16, 28)
-$keyLabel.AutoSize = $true
-$inputPanel.Controls.Add($keyLabel)
+$titleLabel = New-Object System.Windows.Forms.Label
+$titleLabel.Text = $AppName
+$titleLabel.AutoSize = $true
+$titleLabel.Location = New-Object System.Drawing.Point 0, 2
+$titleLabel.Font = $script:FontTitle
+$titleLabel.ForeColor = $script:Palette.TextPrimary
+$titleLabel.BackColor = $script:Palette.WinBg
+$headerPanel.Controls.Add($titleLabel)
 
+$subtitleLabel = New-Object System.Windows.Forms.Label
+$subtitleLabel.Text = "Schedule a keystroke to whichever app is active when it fires."
+$subtitleLabel.AutoSize = $true
+$subtitleLabel.Location = New-Object System.Drawing.Point 2, 36
+$subtitleLabel.Font = $script:FontCaption
+$subtitleLabel.ForeColor = $script:Palette.TextSecondary
+$subtitleLabel.BackColor = $script:Palette.WinBg
+$headerPanel.Controls.Add($subtitleLabel)
+
+$mainLayout.Controls.Add($headerPanel, 0, 0)
+
+# --- Input card ---
+$inputCard = New-Card "New schedule"
+
+$inputCard.Controls.Add((New-FieldLabel "Key" 18 46))
 $keyCombo = New-Object System.Windows.Forms.ComboBox
 $keyCombo.DropDownStyle = "DropDownList"
-$keyCombo.Location = New-Object System.Drawing.Point(16, 50)
+$keyCombo.Location = New-Object System.Drawing.Point 18, 68
 $keyCombo.Width = 150
 $KeyOptions.Keys | ForEach-Object { [void]$keyCombo.Items.Add($_) }
 $keyCombo.SelectedIndex = 0
-$inputPanel.Controls.Add($keyCombo)
+Style-Input $keyCombo
+$inputCard.Controls.Add($keyCombo)
 
-$repeatLabel = New-Object System.Windows.Forms.Label
-$repeatLabel.Text = "Repeat"
-$repeatLabel.Location = New-Object System.Drawing.Point(184, 28)
-$repeatLabel.AutoSize = $true
-$inputPanel.Controls.Add($repeatLabel)
-
+$inputCard.Controls.Add((New-FieldLabel "Repeat" 188 46))
 $repeatCombo = New-Object System.Windows.Forms.ComboBox
 $repeatCombo.DropDownStyle = "DropDownList"
-$repeatCombo.Location = New-Object System.Drawing.Point(184, 50)
-$repeatCombo.Width = 130
+$repeatCombo.Location = New-Object System.Drawing.Point 188, 68
+$repeatCombo.Width = 140
 $RepeatOptions | ForEach-Object { [void]$repeatCombo.Items.Add($_) }
 $repeatCombo.SelectedIndex = 0
-$inputPanel.Controls.Add($repeatCombo)
+Style-Input $repeatCombo
+$inputCard.Controls.Add($repeatCombo)
 
-$dateLabel = New-Object System.Windows.Forms.Label
-$dateLabel.Text = "Date"
-$dateLabel.Location = New-Object System.Drawing.Point(332, 28)
-$dateLabel.AutoSize = $true
-$inputPanel.Controls.Add($dateLabel)
-
+$inputCard.Controls.Add((New-FieldLabel "Date" 348 46))
 $datePicker = New-Object System.Windows.Forms.DateTimePicker
 $datePicker.Format = "Short"
-$datePicker.Location = New-Object System.Drawing.Point(332, 50)
-$datePicker.Width = 130
-$inputPanel.Controls.Add($datePicker)
+$datePicker.Location = New-Object System.Drawing.Point 348, 68
+$datePicker.Width = 140
+Style-Input $datePicker
+$inputCard.Controls.Add($datePicker)
 
-$timeLabel = New-Object System.Windows.Forms.Label
-$timeLabel.Text = "Time"
-$timeLabel.Location = New-Object System.Drawing.Point(480, 28)
-$timeLabel.AutoSize = $true
-$inputPanel.Controls.Add($timeLabel)
-
+$inputCard.Controls.Add((New-FieldLabel "Time" 508 46))
 $timePicker = New-Object System.Windows.Forms.DateTimePicker
 $timePicker.Format = "Time"
 $timePicker.ShowUpDown = $true
-$timePicker.Location = New-Object System.Drawing.Point(480, 50)
-$timePicker.Width = 120
-$inputPanel.Controls.Add($timePicker)
+$timePicker.Location = New-Object System.Drawing.Point 508, 68
+$timePicker.Width = 118
+Style-Input $timePicker
+$inputCard.Controls.Add($timePicker)
 
-$saveButton = New-Object System.Windows.Forms.Button
-$saveButton.Text = "Add to Queue"
-$saveButton.Location = New-Object System.Drawing.Point(16, 86)
-$saveButton.Width = 112
+$saveButton = New-FluentButton -Text "Add to queue" -Width 132 -Primary
+$saveButton.Location = New-Object System.Drawing.Point 18, 112
 $saveButton.Add_Click({
     try {
         Upsert-ScheduleFromForm
@@ -448,12 +719,10 @@ $saveButton.Add_Click({
         Show-AppError "Could not save the schedule." $_
     }
 })
-$inputPanel.Controls.Add($saveButton)
+$inputCard.Controls.Add($saveButton)
 
-$deleteButton = New-Object System.Windows.Forms.Button
-$deleteButton.Text = "Delete"
-$deleteButton.Location = New-Object System.Drawing.Point(136, 86)
-$deleteButton.Width = 92
+$deleteButton = New-FluentButton -Text "Delete" -Width 104
+$deleteButton.Location = New-Object System.Drawing.Point 162, 112
 $deleteButton.Add_Click({
     try {
         $selected = Get-SelectedSchedule
@@ -467,64 +736,71 @@ $deleteButton.Add_Click({
         Show-AppError "Could not delete the schedule." $_
     }
 })
-$inputPanel.Controls.Add($deleteButton)
+$inputCard.Controls.Add($deleteButton)
 
 $noteLabel = New-Object System.Windows.Forms.Label
-$noteLabel.Text = "The key is sent to whichever app is active when the schedule fires."
-$noteLabel.Location = New-Object System.Drawing.Point(332, 91)
+$noteLabel.Text = "Select a row above to edit it, or delete it from the queue."
 $noteLabel.AutoSize = $true
-$inputPanel.Controls.Add($noteLabel)
+$noteLabel.Location = New-Object System.Drawing.Point 288, 120
+$noteLabel.Font = $script:FontCaption
+$noteLabel.ForeColor = $script:Palette.TextSecondary
+$noteLabel.BackColor = $script:Palette.CardBg
+$inputCard.Controls.Add($noteLabel)
 
+$mainLayout.Controls.Add($inputCard, 0, 1)
+
+# --- Queue card ---
 $scheduleGrid = New-Object System.Windows.Forms.DataGridView
-$scheduleGrid.Dock = "Fill"
 $scheduleGrid.AllowUserToAddRows = $false
 $scheduleGrid.AllowUserToDeleteRows = $false
 $scheduleGrid.ReadOnly = $true
 $scheduleGrid.SelectionMode = "FullRowSelect"
 $scheduleGrid.MultiSelect = $false
 $scheduleGrid.AutoSizeColumnsMode = "Fill"
-$scheduleGrid.RowHeadersVisible = $false
 $scheduleGrid.Columns.Add("KeyName", "Key") | Out-Null
 $scheduleGrid.Columns.Add("Repeat", "Repeat") | Out-Null
 $scheduleGrid.Columns.Add("NextRunAt", "Next run") | Out-Null
 $scheduleGrid.Columns.Add("Status", "Status") | Out-Null
+Style-FluentGrid $scheduleGrid
 $scheduleGrid.Add_SelectionChanged({
     if ($scheduleGrid.Focused -and $scheduleGrid.SelectedRows.Count -gt 0) {
         Set-FormFromSchedule (Get-SelectedSchedule)
     }
 })
 
-$queuePanel = New-Object System.Windows.Forms.GroupBox
-$queuePanel.Text = "Queue"
-$queuePanel.Dock = "Fill"
-$queuePanel.Controls.Add($scheduleGrid)
-$mainLayout.Controls.Add($queuePanel, 0, 1)
+$queueCard = New-Card "Queue"
+$queueCard.Controls.Add($scheduleGrid)
+$queueCard.Add_Resize({ $scheduleGrid.SetBounds(16, 44, [math]::Max(0, $this.ClientSize.Width - 32), [math]::Max(0, $this.ClientSize.Height - 60)) })
+$mainLayout.Controls.Add($queueCard, 0, 2)
 
+# --- Log card ---
 $logGrid = New-Object System.Windows.Forms.DataGridView
-$logGrid.Dock = "Fill"
 $logGrid.AllowUserToAddRows = $false
 $logGrid.AllowUserToDeleteRows = $false
 $logGrid.ReadOnly = $true
 $logGrid.SelectionMode = "FullRowSelect"
 $logGrid.MultiSelect = $false
 $logGrid.AutoSizeColumnsMode = "Fill"
-$logGrid.RowHeadersVisible = $false
 $logGrid.Columns.Add("Time", "Time") | Out-Null
 $logGrid.Columns.Add("KeyName", "Key") | Out-Null
 $logGrid.Columns.Add("Status", "Status") | Out-Null
 $logGrid.Columns.Add("Details", "Details") | Out-Null
+Style-FluentGrid $logGrid
 
-$logPanel = New-Object System.Windows.Forms.GroupBox
-$logPanel.Text = "Log"
-$logPanel.Dock = "Fill"
-$logPanel.Controls.Add($logGrid)
-$mainLayout.Controls.Add($logPanel, 0, 2)
+$logCard = New-Card "Recent runs"
+$logCard.Controls.Add($logGrid)
+$logCard.Add_Resize({ $logGrid.SetBounds(16, 44, [math]::Max(0, $this.ClientSize.Width - 32), [math]::Max(0, $this.ClientSize.Height - 60)) })
+$mainLayout.Controls.Add($logCard, 0, 3)
 
+# --- Status bar ---
 $statusLabel = New-Object System.Windows.Forms.Label
 $statusLabel.Dock = "Fill"
 $statusLabel.TextAlign = "MiddleLeft"
+$statusLabel.Font = $script:FontCaption
+$statusLabel.ForeColor = $script:Palette.TextSecondary
+$statusLabel.BackColor = $script:Palette.WinBg
 $statusLabel.Text = "Ready. Keep this app running while schedules are active."
-$mainLayout.Controls.Add($statusLabel, 0, 3)
+$mainLayout.Controls.Add($statusLabel, 0, 4)
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 500
@@ -546,6 +822,17 @@ $timer.Add_Tick({
 })
 
 $form.Add_Shown({
+    # Match the title bar to the app's light/dark theme (Fluent).
+    try {
+        $darkFlag = [int]$script:IsDark
+        [Native.Dwm]::DwmSetWindowAttribute($form.Handle, 20, [ref]$darkFlag, 4) | Out-Null
+        [Native.Dwm]::DwmSetWindowAttribute($form.Handle, 19, [ref]$darkFlag, 4) | Out-Null
+    }
+    catch { }
+
+    $scheduleGrid.SetBounds(16, 44, [math]::Max(0, $queueCard.ClientSize.Width - 32), [math]::Max(0, $queueCard.ClientSize.Height - 60))
+    $logGrid.SetBounds(16, 44, [math]::Max(0, $logCard.ClientSize.Width - 32), [math]::Max(0, $logCard.ClientSize.Height - 60))
+
     Clear-FormSelection
     Refresh-All
     $timer.Start()

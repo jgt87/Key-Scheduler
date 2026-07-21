@@ -4,29 +4,44 @@ A small Windows desktop utility for scheduling a keystroke to be sent to the app
 
 ![Key Scheduler screenshot](docs/screenshot.png)
 
+## Designs
+
+The app ships in two visual styles. They are functionally identical &mdash; only the look differs, so pick whichever you prefer.
+
+| Design | Source | Executable | Look |
+| --- | --- | --- | --- |
+| **Fluent** | `KeyScheduler.ps1` | `dist\KeySchedulerFluent.exe` | Windows 11 [Fluent Design](https://learn.microsoft.com/windows/apps/design/guidelines-overview): system accent color, automatic light/dark theme (including the title bar), Segoe UI type ramp, and rounded cards. |
+| **Classic** | `KeyScheduler.Classic.ps1` | `dist\KeyScheduler.exe` | The original Windows Forms look with grouped panels. |
+
 ## Run
 
 Portable executable:
 
 ```text
-dist\KeyScheduler.exe
+dist\KeySchedulerFluent.exe   # Fluent design
+dist\KeyScheduler.exe         # Classic design
 ```
 
 From PowerShell:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\KeyScheduler.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\KeyScheduler.ps1           # Fluent design
+powershell.exe -ExecutionPolicy Bypass -File .\KeyScheduler.Classic.ps1   # Classic design
 ```
 
-The app must remain running while schedules are active.
+The app must remain running while schedules are active. Both designs read and write the same schedule and history files, so you can switch between them freely.
 
-## Build The Executable
+## Build The Executables
+
+Each launcher embeds a script under the fixed resource name `KeyScheduler.ps1` and runs it with Windows PowerShell. The design is chosen by which source file you map to that resource name.
 
 ```powershell
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /out:.\dist\KeyScheduler.exe /resource:.\KeyScheduler.ps1,KeyScheduler.ps1 .\KeySchedulerLauncher.cs
-```
+# Fluent design -> dist\KeySchedulerFluent.exe
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /out:.\dist\KeySchedulerFluent.exe /resource:.\KeyScheduler.ps1,KeyScheduler.ps1 .\KeySchedulerLauncher.cs
 
-The executable embeds `KeyScheduler.ps1` and launches it with Windows PowerShell.
+# Classic design -> dist\KeyScheduler.exe
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /out:.\dist\KeyScheduler.exe /resource:.\KeyScheduler.Classic.ps1,KeyScheduler.ps1 .\KeySchedulerLauncher.cs
+```
 
 ## Features
 
