@@ -46,6 +46,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /
 ## Features
 
 - Schedule a one-time, daily, or weekly keystroke.
+- Set the run time as an offset from now: enter hours and minutes, press **Set from now**, and the date and time fields are filled in (rolling the date forward when the offset passes midnight).
 - Send common keys such as Enter, Escape, Tab, Space, arrow keys, F1-F12, and simple Ctrl combinations.
 - View pending schedules and recent run results.
 - Edit, disable, or delete schedules.

@@ -297,6 +297,7 @@ function Set-FormFromSchedule {
         $datePicker.Value = $Schedule.NextRunAt.Date
         $timePicker.Value = $Schedule.NextRunAt
     }
+    Reset-RunOffset
     $script:SelectedScheduleId = $Schedule.Id
 }
 
@@ -304,6 +305,38 @@ function Get-RequestedRunTime {
     $date = $datePicker.Value.Date
     $time = $timePicker.Value
     return $date.AddHours($time.Hour).AddMinutes($time.Minute).AddSeconds($time.Second)
+}
+
+function Reset-RunOffset {
+    $offsetHours.Value = 0
+    $offsetMinutes.Value = 0
+}
+
+function Format-RunOffset {
+    param([int]$Hours, [int]$Minutes)
+
+    $parts = @()
+    if ($Hours -gt 0) { $parts += "${Hours}h" }
+    if ($Minutes -gt 0) { $parts += "${Minutes}m" }
+    if ($parts.Count -eq 0) { return "0m" }
+    return ($parts -join " ")
+}
+
+# Push the date and time pickers to "now plus the offset". The date rolls forward
+# on its own whenever the offset crosses midnight.
+function Set-RunTimeFromOffset {
+    $hours = [int]$offsetHours.Value
+    $minutes = [int]$offsetMinutes.Value
+
+    if ($hours -eq 0 -and $minutes -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Enter the hours and minutes to add to the current time.", $AppName) | Out-Null
+        return
+    }
+
+    $target = (Get-Date).AddHours($hours).AddMinutes($minutes)
+    $datePicker.Value = $target.Date
+    $timePicker.Value = $target
+    $statusLabel.Text = "Run time set to $(Format-DateTime $target) - $(Format-RunOffset $hours $minutes) from now."
 }
 
 function Upsert-ScheduleFromForm {
@@ -366,6 +399,7 @@ function Clear-FormSelection {
     $repeatCombo.SelectedIndex = 0
     $datePicker.Value = (Get-Date).Date
     $timePicker.Value = (Get-Date).AddMinutes(1)
+    Reset-RunOffset
 }
 
 # =====================================================================
@@ -584,6 +618,9 @@ function Style-Input {
     if ($Control -is [System.Windows.Forms.ComboBox]) {
         $Control.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
     }
+    if ($Control -is [System.Windows.Forms.NumericUpDown]) {
+        $Control.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    }
 }
 
 # Layout: a flat, borderless list surface consistent with Fluent data tables.
@@ -624,8 +661,8 @@ Load-Data
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = $AppName
-$form.Size = New-Object System.Drawing.Size 920, 660
-$form.MinimumSize = New-Object System.Drawing.Size 800, 560
+$form.Size = New-Object System.Drawing.Size 920, 690
+$form.MinimumSize = New-Object System.Drawing.Size 800, 590
 $form.StartPosition = "CenterScreen"
 $form.BackColor = $script:Palette.WinBg
 $form.ForeColor = $script:Palette.TextPrimary
@@ -638,7 +675,7 @@ $mainLayout.Padding = New-Object System.Windows.Forms.Padding 24, 18, 24, 12
 $mainLayout.ColumnCount = 1
 $mainLayout.RowCount = 5
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 60))) | Out-Null
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 176))) | Out-Null
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 206))) | Out-Null
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 56))) | Out-Null
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 44))) | Out-Null
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 30))) | Out-Null
@@ -709,8 +746,59 @@ $timePicker.Width = 118
 Style-Input $timePicker
 $inputCard.Controls.Add($timePicker)
 
+# Offset entry: add hours + minutes to the current clock time.
+$inputCard.Controls.Add((New-FieldLabel "Run in" 18 118))
+
+$offsetHours = New-Object System.Windows.Forms.NumericUpDown
+$offsetHours.Location = New-Object System.Drawing.Point 68, 114
+$offsetHours.Width = 54
+$offsetHours.Minimum = 0
+$offsetHours.Maximum = 999
+$offsetHours.Add_KeyDown({
+    param($s, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+        $e.SuppressKeyPress = $true
+        Set-RunTimeFromOffset
+    }
+})
+Style-Input $offsetHours
+$inputCard.Controls.Add($offsetHours)
+
+$inputCard.Controls.Add((New-FieldLabel "h" 128 118))
+
+$offsetMinutes = New-Object System.Windows.Forms.NumericUpDown
+$offsetMinutes.Location = New-Object System.Drawing.Point 146, 114
+$offsetMinutes.Width = 54
+$offsetMinutes.Minimum = 0
+$offsetMinutes.Maximum = 999
+$offsetMinutes.Add_KeyDown({
+    param($s, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+        $e.SuppressKeyPress = $true
+        Set-RunTimeFromOffset
+    }
+})
+Style-Input $offsetMinutes
+$inputCard.Controls.Add($offsetMinutes)
+
+$inputCard.Controls.Add((New-FieldLabel "m" 206 118))
+
+$offsetButton = New-FluentButton -Text "Set from now" -Width 110
+$offsetButton.Location = New-Object System.Drawing.Point 228, 112
+$offsetButton.Add_Click({
+    try {
+        Set-RunTimeFromOffset
+    }
+    catch {
+        Show-AppError "Could not set the run time." $_
+    }
+})
+$inputCard.Controls.Add($offsetButton)
+
+$inputCard.Controls.Add((New-FieldLabel "Fills the date and time above, rolling the date over past midnight." 352 118))
+
 $saveButton = New-FluentButton -Text "Add to queue" -Width 132 -Primary
-$saveButton.Location = New-Object System.Drawing.Point 18, 112
+$saveButton.Location = New-Object System.Drawing.Point 18, 152
 $saveButton.Add_Click({
     try {
         Upsert-ScheduleFromForm
@@ -722,7 +810,7 @@ $saveButton.Add_Click({
 $inputCard.Controls.Add($saveButton)
 
 $deleteButton = New-FluentButton -Text "Delete" -Width 104
-$deleteButton.Location = New-Object System.Drawing.Point 162, 112
+$deleteButton.Location = New-Object System.Drawing.Point 162, 152
 $deleteButton.Add_Click({
     try {
         $selected = Get-SelectedSchedule
@@ -741,7 +829,7 @@ $inputCard.Controls.Add($deleteButton)
 $noteLabel = New-Object System.Windows.Forms.Label
 $noteLabel.Text = "Select a row above to edit it, or delete it from the queue."
 $noteLabel.AutoSize = $true
-$noteLabel.Location = New-Object System.Drawing.Point 288, 120
+$noteLabel.Location = New-Object System.Drawing.Point 288, 160
 $noteLabel.Font = $script:FontCaption
 $noteLabel.ForeColor = $script:Palette.TextSecondary
 $noteLabel.BackColor = $script:Palette.CardBg

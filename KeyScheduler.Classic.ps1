@@ -289,6 +289,7 @@ function Set-FormFromSchedule {
         $datePicker.Value = $Schedule.NextRunAt.Date
         $timePicker.Value = $Schedule.NextRunAt
     }
+    Reset-RunOffset
     $script:SelectedScheduleId = $Schedule.Id
 }
 
@@ -296,6 +297,38 @@ function Get-RequestedRunTime {
     $date = $datePicker.Value.Date
     $time = $timePicker.Value
     return $date.AddHours($time.Hour).AddMinutes($time.Minute).AddSeconds($time.Second)
+}
+
+function Reset-RunOffset {
+    $offsetHours.Value = 0
+    $offsetMinutes.Value = 0
+}
+
+function Format-RunOffset {
+    param([int]$Hours, [int]$Minutes)
+
+    $parts = @()
+    if ($Hours -gt 0) { $parts += "${Hours}h" }
+    if ($Minutes -gt 0) { $parts += "${Minutes}m" }
+    if ($parts.Count -eq 0) { return "0m" }
+    return ($parts -join " ")
+}
+
+# Push the date and time pickers to "now plus the offset". The date rolls forward
+# on its own whenever the offset crosses midnight.
+function Set-RunTimeFromOffset {
+    $hours = [int]$offsetHours.Value
+    $minutes = [int]$offsetMinutes.Value
+
+    if ($hours -eq 0 -and $minutes -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Enter the hours and minutes to add to the current time.", $AppName) | Out-Null
+        return
+    }
+
+    $target = (Get-Date).AddHours($hours).AddMinutes($minutes)
+    $datePicker.Value = $target.Date
+    $timePicker.Value = $target
+    $statusLabel.Text = "Run time set to $(Format-DateTime $target) - $(Format-RunOffset $hours $minutes) from now."
 }
 
 function Upsert-ScheduleFromForm {
@@ -358,21 +391,22 @@ function Clear-FormSelection {
     $repeatCombo.SelectedIndex = 0
     $datePicker.Value = (Get-Date).Date
     $timePicker.Value = (Get-Date).AddMinutes(1)
+    Reset-RunOffset
 }
 
 Load-Data
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = $AppName
-$form.Size = New-Object System.Drawing.Size(900, 620)
-$form.MinimumSize = New-Object System.Drawing.Size(780, 520)
+$form.Size = New-Object System.Drawing.Size(900, 650)
+$form.MinimumSize = New-Object System.Drawing.Size(780, 550)
 $form.StartPosition = "CenterScreen"
 
 $mainLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $mainLayout.Dock = "Fill"
 $mainLayout.ColumnCount = 1
 $mainLayout.RowCount = 4
-$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 126))) | Out-Null
+$mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 160))) | Out-Null
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 58))) | Out-Null
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 42))) | Out-Null
 $mainLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 32))) | Out-Null
@@ -436,9 +470,76 @@ $timePicker.Location = New-Object System.Drawing.Point(480, 50)
 $timePicker.Width = 120
 $inputPanel.Controls.Add($timePicker)
 
+# Offset entry: add hours + minutes to the current clock time.
+$offsetLabel = New-Object System.Windows.Forms.Label
+$offsetLabel.Text = "Run in"
+$offsetLabel.Location = New-Object System.Drawing.Point(16, 90)
+$offsetLabel.AutoSize = $true
+$inputPanel.Controls.Add($offsetLabel)
+
+$offsetHours = New-Object System.Windows.Forms.NumericUpDown
+$offsetHours.Location = New-Object System.Drawing.Point(66, 86)
+$offsetHours.Width = 54
+$offsetHours.Minimum = 0
+$offsetHours.Maximum = 999
+$offsetHours.Add_KeyDown({
+    param($s, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+        $e.SuppressKeyPress = $true
+        Set-RunTimeFromOffset
+    }
+})
+$inputPanel.Controls.Add($offsetHours)
+
+$offsetHoursLabel = New-Object System.Windows.Forms.Label
+$offsetHoursLabel.Text = "h"
+$offsetHoursLabel.Location = New-Object System.Drawing.Point(124, 90)
+$offsetHoursLabel.AutoSize = $true
+$inputPanel.Controls.Add($offsetHoursLabel)
+
+$offsetMinutes = New-Object System.Windows.Forms.NumericUpDown
+$offsetMinutes.Location = New-Object System.Drawing.Point(144, 86)
+$offsetMinutes.Width = 54
+$offsetMinutes.Minimum = 0
+$offsetMinutes.Maximum = 999
+$offsetMinutes.Add_KeyDown({
+    param($s, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+        $e.SuppressKeyPress = $true
+        Set-RunTimeFromOffset
+    }
+})
+$inputPanel.Controls.Add($offsetMinutes)
+
+$offsetMinutesLabel = New-Object System.Windows.Forms.Label
+$offsetMinutesLabel.Text = "m"
+$offsetMinutesLabel.Location = New-Object System.Drawing.Point(202, 90)
+$offsetMinutesLabel.AutoSize = $true
+$inputPanel.Controls.Add($offsetMinutesLabel)
+
+$offsetButton = New-Object System.Windows.Forms.Button
+$offsetButton.Text = "Set from now"
+$offsetButton.Location = New-Object System.Drawing.Point(226, 85)
+$offsetButton.Width = 120
+$offsetButton.Add_Click({
+    try {
+        Set-RunTimeFromOffset
+    }
+    catch {
+        Show-AppError "Could not set the run time." $_
+    }
+})
+$inputPanel.Controls.Add($offsetButton)
+
+$offsetNoteLabel = New-Object System.Windows.Forms.Label
+$offsetNoteLabel.Text = "Fills the date and time above, rolling the date over past midnight."
+$offsetNoteLabel.Location = New-Object System.Drawing.Point(356, 90)
+$offsetNoteLabel.AutoSize = $true
+$inputPanel.Controls.Add($offsetNoteLabel)
+
 $saveButton = New-Object System.Windows.Forms.Button
 $saveButton.Text = "Add to Queue"
-$saveButton.Location = New-Object System.Drawing.Point(16, 86)
+$saveButton.Location = New-Object System.Drawing.Point(16, 120)
 $saveButton.Width = 112
 $saveButton.Add_Click({
     try {
@@ -452,7 +553,7 @@ $inputPanel.Controls.Add($saveButton)
 
 $deleteButton = New-Object System.Windows.Forms.Button
 $deleteButton.Text = "Delete"
-$deleteButton.Location = New-Object System.Drawing.Point(136, 86)
+$deleteButton.Location = New-Object System.Drawing.Point(136, 120)
 $deleteButton.Width = 92
 $deleteButton.Add_Click({
     try {
@@ -471,7 +572,7 @@ $inputPanel.Controls.Add($deleteButton)
 
 $noteLabel = New-Object System.Windows.Forms.Label
 $noteLabel.Text = "The key is sent to whichever app is active when the schedule fires."
-$noteLabel.Location = New-Object System.Drawing.Point(332, 91)
+$noteLabel.Location = New-Object System.Drawing.Point(332, 125)
 $noteLabel.AutoSize = $true
 $inputPanel.Controls.Add($noteLabel)
 
