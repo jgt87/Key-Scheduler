@@ -5,6 +5,8 @@
 .claude/
 .agents/
 .impeccable/
+.repowise/
+.vscode/
 
 # Build/runtime artifacts
 *.pdb
